@@ -1,0 +1,48 @@
+# Bytecode / caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.venv/
+venv/
+env/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local logs
+*.log
+viewer_web_launch*.log
+
+# PyInstaller build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Packaged executable output (rebuild with the .spec)
+release/
+
+# Large example RS3 models (do not push)
+examples/
+Joint slope stability ssr - final/
+Open Pit Stability Analysis-SSR/
+
+# Any other RS3 model / compute dumps that may appear locally
+*.rs3v3
+*.rs3compute
+*.rs3fea
+*.rs3model
+*.rs3
