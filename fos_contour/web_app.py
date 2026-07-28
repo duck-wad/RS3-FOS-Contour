@@ -32,7 +32,17 @@ from dash import (
 from .criteria import Criterion, FailureMode, parse_criterion
 from .dataset import ContourDataset, compute_local_fos_array, histories_to_dataset
 from .export import suggest_limit
-from .web_mesh import intensities_for_limit, make_fos_figure, prepare_surface_cache
+from .slice_plane import (
+    AXIS_LABEL,
+    cut_mesh_with_plane,
+    section_slider_range,
+)
+from .web_mesh import (
+    intensities_for_limit,
+    intensities_for_slice,
+    make_fos_figure,
+    prepare_surface_cache,
+)
 
 # Shared extract cache (single-user local app).
 _dataset: Optional[ContourDataset] = None
@@ -52,6 +62,10 @@ _extract_initial_limit: Optional[float] = None
 _pending_figure = None
 _pending_status: Optional[str] = None
 _pending_slider: Optional[tuple[float, float, float, float, dict, str]] = None
+_slice_cache = None
+_view_mode: str = "solid"
+_section_plane: str = "XY"
+_section_position: Optional[float] = None
 
 _VIEWER_CRITERIA = (
     Criterion.TOTAL_DISPLACEMENT,
@@ -99,6 +113,7 @@ def _start_extract_thread(
     global _extract_job_id, _extract_error, _extract_initial_limit
     global _datasets, _suggestions_by, _active_criterion
     global _pending_figure, _pending_status, _pending_slider
+    global _slice_cache, _view_mode, _section_plane, _section_position
 
     if _extract_running:
         _append_log("Extract already in progress — ignoring duplicate click.")
@@ -114,6 +129,10 @@ def _start_extract_thread(
     _pending_figure = None
     _pending_status = None
     _pending_slider = None
+    _slice_cache = None
+    _view_mode = "solid"
+    _section_plane = "XY"
+    _section_position = None
     _extract_job_id += 1
     job_id = _extract_job_id
     _extract_started_at = time.monotonic()
@@ -148,10 +167,16 @@ def _start_extract_thread(
             # Build the Plotly figure here (not in the Dash callback) so the
             # UI keeps streaming logs and a large open-pit mesh cannot freeze
             # the server mid-request.
-            _append_log("Building Plotly figure (may take a minute on large meshes)…")
+            _append_log("Building Plotly figure…")
             t_fig = time.monotonic()
             limit = _nice_limit(float(initial_limit))
+            _append_log("  computing local FoS…")
             lo, hi = _limit_bounds(_dataset, limit)
+            _append_log(
+                f"  assembling Mesh3d "
+                f"({_dataset.n_surface_nodes:,} verts / "
+                f"{_dataset.n_exterior_tris:,} tris)…"
+            )
             fig, status = _figure_for_limit(_dataset, limit)
             marks = _limit_marks(lo, hi, limit)
             readout = f"Limit = {_fmt_limit(limit)} (suggested)"
@@ -192,11 +217,15 @@ def _start_extract_thread(
 def _apply_finished_extract(token: int):
     """Push the pre-built figure into the UI once a background extract finishes."""
     global _extract_applied_job, _pending_figure, _pending_status, _pending_slider
+    global _section_position, _view_mode, _section_plane, _slice_cache
     job = _extract_finished_job
     if job <= _extract_applied_job:
         return None
     _extract_applied_job = job
 
+    # Outputs after the shared limit-slider fields:
+    # section_min, section_max, section_value, section_step, section_marks,
+    # section_readout, section_controls_disabled, view_mode, plane
     if _extract_error or _dataset is None or _pending_figure is None:
         return (
             no_update,
@@ -210,6 +239,15 @@ def _apply_finished_extract(token: int):
             no_update,
             token,
             True,
+            no_update,
+            no_update,
+            no_update,
+            no_update,
+            no_update,
+            no_update,
+            True,
+            "solid",
+            "XY",
         )
 
     lo, hi, limit, step, marks, readout = _pending_slider or (
@@ -225,6 +263,14 @@ def _apply_finished_extract(token: int):
     _pending_figure = None
     _pending_status = None
     _pending_slider = None
+    _view_mode = "solid"
+    _section_plane = "XY"
+    _slice_cache = None
+    s_lo, s_hi, s_mid = section_slider_range(_dataset, "XY")
+    _section_position = s_mid
+    s_step = _section_step(s_lo, s_hi)
+    s_marks = _section_marks(s_lo, s_hi, s_mid)
+    s_readout = _section_readout("XY", s_mid)
     return (
         fig,
         status,
@@ -237,7 +283,41 @@ def _apply_finished_extract(token: int):
         readout,
         (token or 0) + 1,
         True,
+        s_lo,
+        s_hi,
+        s_mid,
+        s_step,
+        s_marks,
+        s_readout,
+        True,  # section controls disabled in solid mode
+        "solid",
+        "XY",
     )
+
+
+def _section_step(lo: float, hi: float) -> float:
+    span = max(float(hi) - float(lo), 1e-9)
+    step = span / 200.0
+    # Keep a readable step size.
+    if step <= 0:
+        return 1.0
+    mag = 10 ** np.floor(np.log10(step))
+    return float(max(mag, step))
+
+
+def _section_marks(lo: float, hi: float, value: float) -> dict:
+    return {
+        float(lo): f"{lo:.4g}",
+        float(value): f"{value:.4g}",
+        float(hi): f"{hi:.4g}",
+    }
+
+
+def _section_readout(plane: str, position: float) -> str:
+    from .slice_plane import plane_axis
+
+    axis = AXIS_LABEL[plane_axis(plane)]
+    return f"{plane} plane · {axis} = {float(position):.4g}"
 
 
 def _btn(color: str) -> dict:
@@ -328,13 +408,51 @@ def _limit_bounds(dataset: ContourDataset, initial_limit: float) -> tuple[float,
 
 
 def _status_for_limit(dataset: ContourDataset, limit: float, local_fos: np.ndarray, failed: np.ndarray) -> str:
-    return (
+    base = (
         f"Limit={_fmt_limit(limit)} | nodes={dataset.n_nodes} | "
         f"elements={dataset.n_elements} | failed={int(failed.sum())} | "
         f"min FoS={float(np.nanmin(local_fos)):.4g} | "
         f"{dataset.criterion.value} / {dataset.failure_mode.value} | "
         f"stage={dataset.stage_number}"
     )
+    if _view_mode == "section" and _slice_cache is not None:
+        base += (
+            f" | section {_slice_cache.plane} "
+            f"({AXIS_LABEL[_slice_cache.axis]}={_slice_cache.position:.4g}, "
+            f"tris={_slice_cache.n_tris:,})"
+        )
+    return base
+
+
+def _ensure_slice_cache(dataset: ContourDataset, plane: str, position: float):
+    """Rebuild the cut mesh when plane/position change."""
+    global _slice_cache
+    from .slice_plane import plane_axis, prepare_element_accel
+
+    plane_u = str(plane).upper()
+    pos = float(position)
+    if (
+        _slice_cache is not None
+        and _slice_cache.plane == plane_u
+        and abs(_slice_cache.position - pos) <= 1e-9
+    ):
+        return _slice_cache
+
+    # Build / reuse the element AABB index only when sectioning is requested.
+    ds_map = _datasets if _datasets else {dataset.criterion.value: dataset}
+    prepare_element_accel(ds_map, progress_callback=_append_log)
+
+    t0 = time.monotonic()
+    axis = plane_axis(plane_u)
+    _append_log(
+        f"Cutting section {plane_u} @ {AXIS_LABEL[axis]}={pos:.4g}…"
+    )
+    _slice_cache = cut_mesh_with_plane(dataset, plane=plane_u, position=pos)
+    _append_log(
+        f"Section {plane_u} @ {AXIS_LABEL[_slice_cache.axis]}={pos:.4g}: "
+        f"{_slice_cache.n_tris:,} tris in {time.monotonic() - t0:.2f}s."
+    )
+    return _slice_cache
 
 
 def _figure_for_limit(
@@ -342,14 +460,39 @@ def _figure_for_limit(
     limit: float,
     *,
     camera: dict | None = None,
+    view_mode: str | None = None,
+    plane: str | None = None,
+    position: float | None = None,
 ):
+    global _view_mode, _section_plane, _section_position
+    mode = (view_mode or _view_mode or "solid").lower()
+    if mode in ("cross-section", "cross_section"):
+        mode = "section"
+    pln = (plane or _section_plane or "XY").upper()
+    if position is None:
+        position = _section_position
+    if position is None and mode == "section":
+        _lo, _hi, position = section_slider_range(dataset, pln)
+
+    _view_mode = mode
+    _section_plane = pln
+    if position is not None:
+        _section_position = float(position)
+
     local_fos, failed = compute_local_fos_array(dataset, limit)
+    slice_cache = None
+    if mode == "section":
+        slice_cache = _ensure_slice_cache(dataset, pln, float(position))
     fig = make_fos_figure(
         dataset,
         local_fos,
         failed=failed,
         title=Path(dataset.model_path).name or "Local FoS",
         camera=camera,
+        view_mode=mode,
+        plane=pln,
+        position=_section_position,
+        slice_cache=slice_cache,
     )
     return fig, _status_for_limit(dataset, limit, local_fos, failed)
 
@@ -362,17 +505,24 @@ def _patch_for_limit(
 ):
     """Update FoS colors only — keeps the current camera (no full figure replace)."""
     local_fos, failed = compute_local_fos_array(dataset, limit)
-    intensities, clim, raw_fos = intensities_for_limit(
-        dataset, local_fos, failed=failed
-    )
     patched = Patch()
-    patched["data"][0]["intensity"] = intensities
-    # Only patch hover payload when the mesh trace has customdata.
-    if dataset.exterior_i:
+    if _view_mode == "section" and _slice_cache is not None and _slice_cache.blends:
+        intensities, clim, raw_fos = intensities_for_slice(
+            dataset, local_fos, _slice_cache, failed=failed
+        )
+        patched["data"][0]["intensity"] = intensities
         patched["data"][0]["customdata"] = raw_fos
-    patched["data"][0]["cmin"] = clim[0]
-    patched["data"][0]["cmax"] = clim[1]
-    # Re-assert camera so WebGL remesh does not snap back to the default view.
+        patched["data"][0]["cmin"] = clim[0]
+        patched["data"][0]["cmax"] = clim[1]
+    else:
+        intensities, clim, raw_fos = intensities_for_limit(
+            dataset, local_fos, failed=failed
+        )
+        patched["data"][0]["intensity"] = intensities
+        if dataset.exterior_i:
+            patched["data"][0]["customdata"] = raw_fos
+        patched["data"][0]["cmin"] = clim[0]
+        patched["data"][0]["cmax"] = clim[1]
     if camera:
         patched["layout"]["scene"]["camera"] = camera
     return patched, _status_for_limit(dataset, limit, local_fos, failed)
@@ -494,6 +644,74 @@ def create_layout(
                                 id="limit-readout",
                                 children=f"Limit = {_fmt_limit(limit_value)}",
                                 style={"fontSize": "13px", "margin": "4px 0 10px"},
+                            ),
+                            _labeled(
+                                "View",
+                                dcc.Dropdown(
+                                    id="view-mode",
+                                    options=[
+                                        {
+                                            "label": "Solid surface",
+                                            "value": "solid",
+                                        },
+                                        {
+                                            "label": "Cross-section",
+                                            "value": "section",
+                                        },
+                                    ],
+                                    value="solid",
+                                    clearable=False,
+                                    searchable=False,
+                                ),
+                            ),
+                            _labeled(
+                                "Section plane",
+                                dcc.Dropdown(
+                                    id="section-plane",
+                                    options=[
+                                        {
+                                            "label": "XY (cut along Z)",
+                                            "value": "XY",
+                                        },
+                                        {
+                                            "label": "XZ (cut along Y)",
+                                            "value": "XZ",
+                                        },
+                                        {
+                                            "label": "YZ (cut along X)",
+                                            "value": "YZ",
+                                        },
+                                    ],
+                                    value="XY",
+                                    clearable=False,
+                                    searchable=False,
+                                    disabled=True,
+                                ),
+                            ),
+                            html.Label(
+                                "Section position",
+                                style={"fontWeight": "bold", "marginTop": "4px"},
+                            ),
+                            dcc.Slider(
+                                id="section-slider",
+                                min=0.0,
+                                max=1.0,
+                                step=0.01,
+                                value=0.5,
+                                marks=None,
+                                tooltip=None,
+                                allow_direct_input=False,
+                                updatemode="mouseup",
+                                disabled=True,
+                            ),
+                            html.Div(
+                                id="section-readout",
+                                children="XY plane · Z = —",
+                                style={
+                                    "fontSize": "13px",
+                                    "margin": "4px 0 10px",
+                                    "color": "#666",
+                                },
                             ),
                             html.Div(
                                 id="status-bar",
@@ -666,6 +884,8 @@ def _extract_datasets(
 
         progress("Step 5/5: building exterior surface cache…")
         prepare_surface_cache(datasets, progress_callback=progress)
+        # Cross-section element index is built lazily on first section view so
+        # solid FoS display is not blocked on large open-pit meshes.
         progress("Contour caches ready.")
         active = preferred.value if preferred.value in datasets else next(iter(datasets))
         initial_limit = float(suggestions_by[active]["suggested"])
@@ -949,12 +1169,23 @@ def create_app(
         Output("limit-readout", "children"),
         Output("extract-token", "data"),
         Output("log-poll", "disabled"),
+        Output("section-slider", "min"),
+        Output("section-slider", "max"),
+        Output("section-slider", "value"),
+        Output("section-slider", "step"),
+        Output("section-slider", "marks"),
+        Output("section-readout", "children"),
+        Output("section-plane", "disabled"),
+        Output("section-slider", "disabled"),
+        Output("view-mode", "value"),
+        Output("section-plane", "value"),
         Input("log-poll", "n_intervals"),
         State("extract-token", "data"),
         prevent_initial_call=True,
     )
     def stream_log(_n_intervals, token):
         """Live log while extract runs, then apply the finished mesh."""
+        idle_tail = (no_update,) * 10  # section + view fields
         if _extract_running:
             elapsed = time.monotonic() - _extract_started_at
             status = f"Extracting… {elapsed:.0f}s — {_last_log_line()}"
@@ -970,11 +1201,56 @@ def create_app(
                 no_update,
                 no_update,
                 False,
-            )
+            ) + idle_tail
 
         applied = _apply_finished_extract(token or 0)
         if applied is not None:
-            return applied
+            # Expand single disabled flag into plane + slider disabled.
+            (
+                fig,
+                status,
+                log,
+                lo,
+                hi,
+                limit,
+                step,
+                marks,
+                readout,
+                tok,
+                poll_off,
+                s_lo,
+                s_hi,
+                s_mid,
+                s_step,
+                s_marks,
+                s_readout,
+                section_disabled,
+                view_mode,
+                plane,
+            ) = applied
+            return (
+                fig,
+                status,
+                log,
+                lo,
+                hi,
+                limit,
+                step,
+                marks,
+                readout,
+                tok,
+                poll_off,
+                s_lo,
+                s_hi,
+                s_mid,
+                s_step,
+                s_marks,
+                s_readout,
+                section_disabled,
+                section_disabled,
+                view_mode,
+                plane,
+            )
 
         return (
             no_update,
@@ -988,7 +1264,130 @@ def create_app(
             no_update,
             no_update,
             True,
-        )
+        ) + idle_tail
+
+    @callback(
+        Output("fos-graph", "figure", allow_duplicate=True),
+        Output("status-bar", "children", allow_duplicate=True),
+        Output("log-panel", "children", allow_duplicate=True),
+        Output("section-slider", "min", allow_duplicate=True),
+        Output("section-slider", "max", allow_duplicate=True),
+        Output("section-slider", "value", allow_duplicate=True),
+        Output("section-slider", "step", allow_duplicate=True),
+        Output("section-slider", "marks", allow_duplicate=True),
+        Output("section-readout", "children", allow_duplicate=True),
+        Output("section-plane", "disabled", allow_duplicate=True),
+        Output("section-slider", "disabled", allow_duplicate=True),
+        Input("view-mode", "value"),
+        Input("section-plane", "value"),
+        Input("section-slider", "value"),
+        State("limit-slider", "value"),
+        State("extract-token", "data"),
+        State("camera-store", "data"),
+        prevent_initial_call=True,
+    )
+    def on_section_changed(view_mode, plane, position, limit, token, camera):
+        """Switch solid/section view or move the cutting plane."""
+        global _view_mode, _section_plane, _section_position, _slice_cache
+        if _dataset is None or not token or _extract_running:
+            return (no_update,) * 11
+
+        mode = (view_mode or "solid").lower()
+        if mode in ("cross-section", "cross_section"):
+            mode = "section"
+        pln = (plane or "XY").upper()
+        cam = camera if isinstance(camera, dict) else None
+
+        try:
+            limit_f = _nice_limit(float(limit)) if limit is not None else None
+            if limit_f is None or limit_f <= 0:
+                if _extract_initial_limit is not None:
+                    limit_f = _nice_limit(float(_extract_initial_limit))
+                else:
+                    return (no_update,) * 11
+
+            if mode != "section":
+                _view_mode = "solid"
+                _slice_cache = None
+                fig, status = _figure_for_limit(
+                    _dataset,
+                    limit_f,
+                    camera=cam,
+                    view_mode="solid",
+                )
+                # Keep current section slider range; just disable controls.
+                return (
+                    fig,
+                    status,
+                    _log_text(),
+                    no_update,
+                    no_update,
+                    no_update,
+                    no_update,
+                    no_update,
+                    no_update,
+                    True,
+                    True,
+                )
+
+            # Entering / updating section mode.
+            if position is None:
+                _s_lo, _s_hi, position = section_slider_range(_dataset, pln)
+            else:
+                position = float(position)
+
+            plane_changed = pln != _section_plane
+            _view_mode = "section"
+            _section_plane = pln
+            _section_position = float(position)
+
+            if plane_changed:
+                s_lo, s_hi, s_mid = section_slider_range(_dataset, pln)
+                # Keep position if still in range; otherwise jump to mid.
+                if not (s_lo <= _section_position <= s_hi):
+                    _section_position = s_mid
+                position = _section_position
+                s_step = _section_step(s_lo, s_hi)
+                s_marks = _section_marks(s_lo, s_hi, position)
+            else:
+                s_lo = s_hi = s_step = s_marks = no_update
+
+            fig, status = _figure_for_limit(
+                _dataset,
+                limit_f,
+                camera=cam,
+                view_mode="section",
+                plane=pln,
+                position=float(position),
+            )
+            return (
+                fig,
+                status,
+                _log_text(),
+                s_lo if plane_changed else no_update,
+                s_hi if plane_changed else no_update,
+                float(position) if plane_changed else no_update,
+                s_step if plane_changed else no_update,
+                s_marks if plane_changed else no_update,
+                _section_readout(pln, float(position)),
+                False,
+                False,
+            )
+        except Exception:  # noqa: BLE001
+            _append_log(traceback.format_exc())
+            return (
+                no_update,
+                "Section update failed — see log.",
+                _log_text(),
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+            )
 
     # Clear the old view immediately; background thread + log-poll stream progress.
     clientside_callback(

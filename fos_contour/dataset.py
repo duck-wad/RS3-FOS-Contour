@@ -44,6 +44,8 @@ class ContourDataset:
     edge_x: list[float | None] = field(default_factory=list)
     edge_y: list[float | None] = field(default_factory=list)
     edge_z: list[float | None] = field(default_factory=list)
+    # Shared cross-section acceleration (corners + AABB); set by prepare_element_accel.
+    element_accel: Any = field(default=None, repr=False, compare=False)
     _id_to_index: dict[Any, int] | None = field(default=None, repr=False, compare=False)
 
     @property

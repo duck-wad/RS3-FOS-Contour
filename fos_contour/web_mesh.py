@@ -202,19 +202,17 @@ def fos_to_band_index(
     levels: list[float],
     *,
     failed: np.ndarray | list[bool] | None = None,
-) -> list[float]:
+) -> np.ndarray:
     """Map failed FoS → discrete band centers; never-fail → gray slot."""
     n = max(len(levels), 1)
     gray_mid = float(n) + 0.5
+    arr = np.asarray(fos_values, dtype=float)
+    if arr.size == 0:
+        return np.zeros(0, dtype=float)
     if not levels:
-        return [gray_mid for _ in fos_values]
+        return np.full(arr.shape, gray_mid, dtype=float)
 
-    arr = np.asarray(
-        [float(v) if np.isfinite(v) else float("nan") for v in fos_values],
-        dtype=float,
-    )
     if failed is None:
-        # Without a mask, treat non-finite / top-of-ladder as never-fail.
         fail_mask = np.isfinite(arr)
     else:
         fail_mask = np.asarray(failed, dtype=bool)
@@ -229,7 +227,7 @@ def fos_to_band_index(
         sub = np.where(np.isfinite(sub), sub, lvl[0])
         idx = np.abs(sub[:, None] - lvl[None, :]).argmin(axis=1)
         out[fail_mask] = idx.astype(float) + 0.5
-    return out.tolist()
+    return out
 
 
 def _collect_exterior_triangles(
@@ -337,9 +335,8 @@ def build_plotly_mesh(
         else:
             i_idx, j_idx, k_idx = [], [], []
 
-    intensity = [
-        float(v) if np.isfinite(v) else float(dataset.max_srf) for v in fos_src
-    ]
+    intensity = np.asarray(fos_src, dtype=float)
+    intensity = np.where(np.isfinite(intensity), intensity, float(dataset.max_srf))
 
     return PlotlyMesh(
         # Keep numpy — Plotly accepts it and skips a huge list copy.
@@ -518,9 +515,25 @@ def make_fos_figure(
     failed: np.ndarray | None = None,
     title: str | None = None,
     camera: dict | None = None,
+    view_mode: str = "solid",
+    plane: str = "XY",
+    position: float | None = None,
+    slice_cache=None,
 ):
-    """Build a Plotly Figure for the FoS contour mesh."""
+    """Build a Plotly Figure for the FoS contour mesh or a cross-section cut."""
     import plotly.graph_objects as go
+
+    if str(view_mode).lower() in ("section", "cross-section", "cross_section"):
+        return _make_section_figure(
+            dataset,
+            local_fos,
+            failed=failed,
+            title=title,
+            camera=camera,
+            plane=plane,
+            position=position,
+            slice_cache=slice_cache,
+        )
 
     mesh = build_plotly_mesh(dataset, local_fos)
     fig = go.Figure()
@@ -615,6 +628,142 @@ def make_fos_figure(
     return fig
 
 
+def _make_section_figure(
+    dataset: ContourDataset,
+    local_fos: np.ndarray,
+    *,
+    failed: np.ndarray | None = None,
+    title: str | None = None,
+    camera: dict | None = None,
+    plane: str = "XY",
+    position: float | None = None,
+    slice_cache=None,
+):
+    """Opaque FoS cut + faint ghost exterior for orientation."""
+    import plotly.graph_objects as go
+
+    from .slice_plane import (
+        AXIS_LABEL,
+        cut_mesh_with_plane,
+        interpolate_slice_failed,
+        interpolate_slice_field,
+        section_slider_range,
+    )
+
+    if slice_cache is None:
+        if position is None:
+            _lo, _hi, position = section_slider_range(dataset, plane)
+        slice_cache = cut_mesh_with_plane(
+            dataset, plane=plane, position=float(position)
+        )
+
+    clim = fos_color_limits(dataset)
+    levels = fos_contour_levels(clim)
+    colorscale = discrete_fos_colorscale(levels)
+    colorbar = fos_colorbar(levels)
+    n_levels = max(len(levels), 1)
+    cmax = float(n_levels + 1)
+
+    fig = go.Figure()
+
+    if slice_cache.n_tris > 0 and slice_cache.blends:
+        fos_slice = interpolate_slice_field(slice_cache.blends, local_fos)
+        failed_slice = None
+        if failed is not None:
+            failed_slice = interpolate_slice_failed(slice_cache.blends, failed)
+        raw = [
+            float(v) if np.isfinite(v) else float(dataset.max_srf) for v in fos_slice
+        ]
+        band = fos_to_band_index(raw, levels, failed=failed_slice)
+        xyz = slice_cache.xyz
+        fig.add_trace(
+            go.Mesh3d(
+                x=xyz[:, 0],
+                y=xyz[:, 1],
+                z=xyz[:, 2],
+                i=slice_cache.i,
+                j=slice_cache.j,
+                k=slice_cache.k,
+                intensity=band,
+                customdata=raw,
+                intensitymode="vertex",
+                colorscale=colorscale,
+                cmin=0.0,
+                cmax=cmax,
+                flatshading=False,
+                showscale=True,
+                colorbar=colorbar,
+                lighting=dict(_FLAT_LIGHTING),
+                lightposition=dict(x=0, y=0, z=100),
+                name="Section FoS",
+                hovertemplate="FoS=%{customdata:.3g}<extra></extra>",
+            )
+        )
+    else:
+        # Empty cut — still show colorbar scale via a tiny invisible mesh.
+        fig.add_trace(
+            go.Mesh3d(
+                x=[0],
+                y=[0],
+                z=[0],
+                i=[],
+                j=[],
+                k=[],
+                intensity=[0.5],
+                colorscale=colorscale,
+                cmin=0.0,
+                cmax=cmax,
+                showscale=True,
+                colorbar=colorbar,
+                opacity=0.0,
+                name="Section FoS",
+                hoverinfo="skip",
+            )
+        )
+
+    # Ghost exterior shell for context.
+    if dataset.surface_xyz is not None and dataset.exterior_i:
+        sx = dataset.surface_xyz
+        fig.add_trace(
+            go.Mesh3d(
+                x=sx[:, 0],
+                y=sx[:, 1],
+                z=sx[:, 2],
+                i=dataset.exterior_i,
+                j=dataset.exterior_j,
+                k=dataset.exterior_k,
+                color="rgb(160,160,160)",
+                opacity=0.12,
+                flatshading=True,
+                showscale=False,
+                lighting=dict(_FLAT_LIGHTING),
+                name="Exterior",
+                hoverinfo="skip",
+            )
+        )
+
+    axis = slice_cache.axis
+    axis_name = AXIS_LABEL.get(axis, "?")
+    scene = dict(
+        aspectmode="data",
+        bgcolor="white",
+        uirevision="fos-contour",
+        **_scene_axis_ranges(dataset),
+    )
+    if camera:
+        scene["camera"] = camera
+
+    fig.update_layout(
+        title=title
+        or f"Cross-section {slice_cache.plane} ({axis_name}={slice_cache.position:.4g})",
+        margin=dict(l=0, r=0, t=40, b=0),
+        paper_bgcolor="white",
+        uirevision="fos-contour",
+        scene=scene,
+    )
+    return fig
+
+
 def intensities_for_limit(
     dataset: ContourDataset,
     local_fos: np.ndarray,
@@ -635,4 +784,31 @@ def intensities_for_limit(
     ]
     band = fos_to_band_index(raw, levels, failed=failed_src)
     n_levels = max(len(levels), 1)
-    return band, (0.0, float(n_levels + 1)), raw
+    return band.tolist(), (0.0, float(n_levels + 1)), raw
+
+
+def intensities_for_slice(
+    dataset: ContourDataset,
+    local_fos: np.ndarray,
+    slice_cache,
+    *,
+    failed: np.ndarray | None = None,
+) -> tuple[list[float], tuple[float, float], list[float]]:
+    """Band intensities for a cached cross-section mesh."""
+    from .slice_plane import interpolate_slice_failed, interpolate_slice_field
+
+    clim = fos_color_limits(dataset)
+    levels = fos_contour_levels(clim)
+    if slice_cache is None or not slice_cache.blends:
+        n_levels = max(len(levels), 1)
+        return [], (0.0, float(n_levels + 1)), []
+    fos_src = interpolate_slice_field(slice_cache.blends, local_fos)
+    failed_src = None
+    if failed is not None:
+        failed_src = interpolate_slice_failed(slice_cache.blends, failed)
+    raw = [
+        float(v) if np.isfinite(v) else float(dataset.max_srf) for v in fos_src
+    ]
+    band = fos_to_band_index(raw, levels, failed=failed_src)
+    n_levels = max(len(levels), 1)
+    return band.tolist(), (0.0, float(n_levels + 1)), raw
