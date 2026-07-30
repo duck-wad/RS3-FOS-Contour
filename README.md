@@ -1,4 +1,4 @@
-﻿RS3 Local FoS Contour Viewer (Executable)
+RS3 Local FoS Contour Viewer (Executable)
 
 This folder contains a pre-built Windows executable for the RS3 Local FoS Contour Viewer.
 
