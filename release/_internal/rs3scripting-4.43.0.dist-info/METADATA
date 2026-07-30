@@ -1,0 +1,70 @@
+Metadata-Version: 2.4
+Name: RS3Scripting
+Version: 4.43.0
+Summary: Client library for interacting with RS3 through python
+Author: Rocscience
+License-Expression: MIT
+Project-URL: Homepage, https://www.rocscience.com/software/rs3
+Project-URL: Documentation, https://www.rocscience.com/help/rs3/overview
+Keywords: Rocscience,RS3,Scripting,RocScript,Geotechnical,Finite Element Analysis,FEM,3D
+Classifier: Programming Language :: Python :: 3
+Classifier: Topic :: Scientific/Engineering
+Requires-Python: >=3.7
+Description-Content-Type: text/markdown
+License-File: License.txt
+Requires-Dist: grpcio
+Requires-Dist: protobuf<6.0
+Dynamic: license-file
+
+## Introduction 
+This project is a library that can be used to interact with RS3 through python.
+
+Release notes for the library are kept here:
+https://www.rocscience.com/support/rs3/release-notes
+
+RS3 can be downloaded here:
+https://www.rocscience.com/support/program-downloads
+
+The library itself is hosted on PyPi here:
+https://pypi.org/project/RS3Scripting/
+
+### Goal
+Each function exposed corresponds to an equivalent operation you could have done through the UI.  
+Using this idea, the user should be able to edit models and get results without having to go through the UI at all.
+Although only a limited set of functionality is exposed for now, some basic workflows should still be possible. For a list of the functionality we have so far, see [Exposed Functionality](#exposed-functionality).
+
+### Python UI equivalents
+Events and workflows done in the UI will have equivalents in the python library.  
+Wherever a dialog is shown in the UI, there will be an equivalent class with methods that mimick the dialog's behavior.  
+Wherever a warning or error dialog is displayed, an exception will be thrown, or a warning will be displayed in python instead.  
+Wherever you can select and manipulate an entity, identifiers can be used in the library to get references to those entities in python and objects will be constructed to help you interface with them.  
+
+### How it works
+Each function in the library is a wrapper to make an api call to the Application.  
+Objects retrieved through function calls will often not contain any data themselves, but will instead be proxies, allowing you to get information from the objects in the application.  
+For this reason, debugging will sometimes be tricky, as not all data will always be available for you to inspect unless you get it and assign it to a variable yourself.  
+
+### Warnings
+References can be *invalidated* whenever the corresponding object in the application is destroyed or reloaded. You will need to watch out for expired referenecs and renew them when needed as it can cause crashes or incorrect results if not managed properly. Functions that invalidate objects will always be marked with a warning and will indicate which objects should be re-loaded. 
+
+## Exposed Functionality
+The current set of functionality exposed is limited. With this version of the library, you can:  
+- **Model Operations**: Open/save/close models, compute models
+- **Project Settings**: Define stages (names, number), set analysis type (stress, groundwater, dynamic), solver options, units configuration
+- **Selection & Queries**: Select volumes by name, point query, or bounding box (Cube, Cylinder, Sphere regions); filter results by entity
+- **External Volumes**: Assign materials to selected volumes, rename volumes, access volume properties
+- **Material Properties**: Define and modify constitutive models (Mohr-Coulomb, Hoek-Brown, Hardening Soil, Cam-Clay, etc.), hydraulic properties, initial conditions, stage factors, datum dependencies
+- **Support Elements**: Configure liners, bolts, beams, piles, joints, and composite lining systems with full property control and stage factors
+- **Loading Conditions**: Field stress (constant, gravity, advanced options), restraints
+- **Mesh**: Mesh Control
+- **Results Extraction**: Query nodal/element results for solids, liners, bolts, beams, piles, and joints; filter by region or entity name; switch between global and local coordinate systems (e.g., tunnel frames)
+- **Result Types**: Displacements (X, Y, Z, total, normal), stresses, strains, axial forces, moments, shear forces, failure types
+
+## Getting Started
+
+**Getting started guide**  
+https://www.rocscience.com/help/rs3/tutorials/scripting/getting-started-with-rs3-python-scripting 
+
+**Tutorials**  
+https://www.rocscience.com/help/rs3/tutorials/scripting/scripting-tunnel-tutorial-part-1
+https://www.rocscience.com/help/rs3/tutorials/scripting/scripting-tunnel-tutorial-part-2

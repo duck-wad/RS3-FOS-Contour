@@ -34,9 +34,6 @@ dist/
 *.egg-info/
 .eggs/
 
-# Packaged executable output at project root
-release/
-
 # Large example RS3 models (do not push)
 examples/
 Joint slope stability ssr - final/
