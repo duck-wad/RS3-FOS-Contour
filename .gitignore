@@ -26,13 +26,15 @@ desktop.ini
 *.log
 viewer_web_launch*.log
 
-# PyInstaller build artifacts
+# PyInstaller build artifacts (created under source/)
+source/build/
+source/dist/
 build/
 dist/
 *.egg-info/
 .eggs/
 
-# Packaged executable output (rebuild with the .spec)
+# Packaged executable output at project root
 release/
 
 # Large example RS3 models (do not push)
